@@ -119,7 +119,7 @@ label(State, [_Char | RestFragmentStr], Acc) ->
 
 
 -ifdef(TEST).
-remap_test() ->
+label_test() ->
     ?assertEqual("fdgsf---gs7-fgs--d7fddg-123", label("fd%gsf---gs7-f$gs--d7fddg-123")),
     ?assertEqual("4abc123", label("4abc123")),
     ?assertEqual("89fdgsf---gs7-fgs--d7fddg-123", label("89fdgsf---gs7-fgs--d7fddg-123")),
