@@ -119,6 +119,15 @@ label(State, [_Char | RestFragmentStr], Acc) ->
 
 
 -ifdef(TEST).
+domain_frag_test() ->
+    ?assertEqual(<<"fdgsf4abc123">>, domain_frag(<<"fdgsf/4abc123">>)),
+    ?assertEqual(<<"fdgsf-4abc123">>, domain_frag(<<"fdgsf_4abc123">>)),
+    ?assertEqual(<<"fdgsf.4abc123">>, domain_frag(<<"fdgsf.4abc123">>)),
+    ?assertEqual(<<"fdgsf.4abc123">>, domain_frag(<<"fdgsf.4abc123.">>)),
+    ?assertEqual(<<"fdgsf.4abc123">>, domain_frag(<<".fdgsf.4abc123">>)),
+    ?assertEqual(<<"fdgsf.4abc123">>, domain_frag(<<"fdgsf..4abc123">>)),
+    ?assertEqual(<<"010203040506070809010111213141516171819202122232425262728293031.010203040506070809010111213141516171819202122232425262728293031">>, domain_frag(<<"0102030405060708090101112131415161718192021222324252627282930313233.0102030405060708090101112131415161718192021222324252627282930313233">>)).
+
 remap_test() ->
     ?assertEqual("fdgsf---gs7-fgs--d7fddg-123", label("fd%gsf---gs7-f$gs--d7fddg-123")),
     ?assertEqual("4abc123", label("4abc123")),
