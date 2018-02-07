@@ -5,10 +5,8 @@
   {applications,
    [kernel,
     stdlib,
-    jsx,
-    lager,
-    inets,
-    ssl
+    jiffy,
+    lager
    ]},
   {env,[]},
   {modules, []},
