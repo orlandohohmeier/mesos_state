@@ -17,86 +17,33 @@
 -include_lib("eunit/include/eunit.hrl").
 -endif.
 
--define(SERVICE_AUTH_TOKEN_ENV_VARIABLE, "SERVICE_AUTH_TOKEN").
-
 -opaque mesos_agent_state() :: map().
 
 -export_type([mesos_agent_state/0]).
 
-
 %% API
--export([poll/0, poll/1, poll/2, parse_response/1, flags/1, pid/1, tasks/1, id/1, slaves/1, frameworks/1]).
-
--spec(proto() -> string()).
-proto() ->
-  case application:get_env(?APP, ssl, false) of
-    true ->
-      "https";
-    false ->
-      "http"
-  end.
-
--spec(maybe_enable_ssl(list()) -> list()).
-maybe_enable_ssl(Options) ->
-  case application:get_env(?APP, ssl, false) of
-    true ->
-      [{ssl, [{verify, verify_none}]}|Options];
-    false ->
-      Options
-  end.
-
-format_token(AuthToken) ->
-  lists:flatten("token=" ++ AuthToken).
-
--spec(maybe_add_token(list({string(), string()})) -> list({string(), string()})).
-maybe_add_token(Headers) ->
-  case os:getenv(?SERVICE_AUTH_TOKEN_ENV_VARIABLE) of
-    false ->
-      Headers;
-    AuthToken0 ->
-      AuthToken1 = format_token(AuthToken0),
-      [{"Authorization", AuthToken1}]
-  end.
-
--spec(poll() -> {ok, mesos_agent_state()} | {error, Reason :: term()}).
-poll() ->
-  Proto = proto(),
-  poll(Proto ++ "://localhost:5051/state").
-
--spec(poll(inet:ip_address(), inet:port_number()) -> {ok, mesos_agent_state()} | {error, Reason :: term()}).
-poll(IP, Port) when is_tuple(IP) andalso is_number(Port) ->
-  Proto = proto(),
-  IPStr = inet:ntoa(IP),
-  PortStr = integer_to_list(Port),
-  URI = lists:flatten(Proto ++ "://" ++ IPStr ++ ":" ++ PortStr ++ "/state"),
-  poll(URI).
-
--spec(poll(string()) -> {ok, mesos_agent_state()} | {error, Reason :: term()}).
-poll(URI) ->
-  Options = [
-    {timeout, application:get_env(?APP, timeout, ?DEFAULT_TIMEOUT)},
-    {connect_timeout, application:get_env(?APP, connect_timeout, ?DEFAULT_CONNECT_TIMEOUT)}
-  ],
-  Options1 = maybe_enable_ssl(Options),
-  {ok, Hostname} = inet:gethostname(),
-  UserAgent = lists:flatten(io_lib:format("Mesos-State / Host: ~s, Pid: ~s", [Hostname, os:getpid()])),
-  Headers = [{"Accept", "application/json"}, {"User-Agent", UserAgent}],
-  Headers1 = maybe_add_token(Headers),
-  Response = httpc:request(get, {URI, Headers1}, Options1, [{body_format, binary}]),
-  handle_response(Response).
-
-handle_response({error, Reason}) ->
-  {error, Reason};
-handle_response({ok, {_StatusLine = {_HTTPVersion, 200 = _StatusCode, _ReasonPhrase}, _Headers, Body}}) ->
-  parse_response(Body);
-handle_response({ok, {StatusLine, _Headers, _Body}}) ->
-  {error, StatusLine}.
+-export([
+  parse_response/1,
+  flags/1, pid/1, tasks/1, id/1,
+  slaves/1, frameworks/1
+]).
 
 -spec(parse_response(Body :: binary()) -> {ok, mesos_agent_state()}).
 parse_response(Body) ->
+  ParsedBody = jiffy:decode(Body, [return_maps]),
   %% The labels should be relatively tiny -- just let them be atoms
-  ParsedBody = jsx:decode(Body, [return_maps, {labels, atom}]),
-  parse_response2(ParsedBody).
+  ParsedBody0 = atom_labels(ParsedBody),
+  parse_response2(ParsedBody0).
+
+-spec atom_labels(jiffy:json_value()) -> jiffy:json_value().
+atom_labels(Term) when is_map(Term) ->
+  maps:fold(fun (Key, Value, Acc) ->
+    Acc#{binary_to_atom(Key, latin1) => atom_labels(Value)}
+  end, #{}, Term);
+atom_labels(Term) when is_list(Term) ->
+  lists:map(fun atom_labels/1, Term);
+atom_labels(Term) ->
+  Term.
 
 parse_response2(ParsedBody) ->
   {ok, ParsedBody}.
@@ -301,27 +248,29 @@ container(undefined) ->
   undefined;
 container(#{docker := Docker, type := <<"DOCKER">>}) ->
   #container{type = docker, docker = docker(Docker)};
-container(#{type := <<"MESOS">>}) ->
-    #container{type = mesos}.
+container(#{type := <<"MESOS">>} = Mesos) ->
+  #container{type = mesos, network_infos = network_infos(Mesos)}.
 
-port_mappings(#{port_mappings := PortMappings}) -> [ port_mapping(PM) || PM <- PortMappings ];
-port_mappings(_) -> [].
-
-port_mapping(#{container_port := ContainerPort, host_port := HostPort, protocol := Protocol}) ->
-  #port_mapping{
-    protocol = protocol(Protocol),
-    host_port = HostPort,
-    container_port = ContainerPort
-  }.
+network_infos(#{network_infos := NetworkInfos}) -> 
+  network_infos(NetworkInfos, []);
+network_infos(_) -> [].
 
 force_pull_image(#{force_pull_image := ForcePullImage}) -> ForcePullImage;
 force_pull_image(_) -> false.
+
+network_type(BinString) when is_binary(BinString) ->
+    String = binary_to_list(BinString),
+    case string:to_lower(String) of
+        "bridge" -> 'bridge';
+        "host" -> 'host';
+        "user" -> 'user'
+    end.
 
 docker(#{image := Image, network := Network} = Docker) ->
     #docker{
        force_pull_image = force_pull_image(Docker),
        image = Image,
-       network = list_to_existing_atom(string:to_lower(binary_to_list(Network))),
+       network = network_type(Network),
        port_mappings = port_mappings(Docker)}.
 
 task_statuses([], Acc) ->
@@ -362,33 +311,56 @@ container_status(_ContainerStatus = #{network_infos := NetworkInfos}) ->
   #container_status{
     cgroup_info = undefined,
     network_infos = network_infos(NetworkInfos, [])
+  };
+container_status(_) ->
+  #container_status{
+    cgroup_info = undefined,
+    network_infos = []
   }.
 
 cgroup_info(#{net_cls := #{classid := ClassID}}) ->
   #cgroup_info{net_cls = #net_cls{classid = ClassID}}.
 
-
 network_infos([], Acc) ->
   Acc;
+network_infos([#{ip_addresses := IPAddresses, port_mappings := PortMappings}|Rest], Acc) ->
+  NetworkInfo1 = #network_info{ip_addresses = ip_addresses(IPAddresses, []),
+                               port_mappings = port_mappings(PortMappings, [])},
+  network_infos(Rest, [NetworkInfo1|Acc]);
 network_infos([#{ip_addresses := IPAddresses}|Rest], Acc) ->
   NetworkInfo1 = #network_info{ip_addresses = ip_addresses(IPAddresses, [])},
   network_infos(Rest, [NetworkInfo1|Acc]);
-%% We have no ip_addresses
-network_infos(IPAddresses = [#{ip_address := _IPAddress}], []) ->
-  NetworkInfo = #network_info{ip_addresses = ip_addresses(IPAddresses, [])},
-  [NetworkInfo].
+network_infos([#{port_mappings := PortMappings}|Rest], Acc) ->
+  NetworkInfo1 = #network_info{ip_addresses = [], port_mappings = port_mappings(PortMappings, [])},
+  network_infos(Rest, [NetworkInfo1|Acc]);
+network_infos([_|Rest], Acc) ->
+  network_infos(Rest, Acc).
 
 ip_addresses([], Acc) ->
   Acc;
 ip_addresses([#{ip_address := IPAddressBin}|Rest], Acc) ->
   IPAddressStr = binary_to_list(IPAddressBin),
-  case inet:parse_ipv4_address(IPAddressStr) of
+  case inet:parse_address(IPAddressStr) of
     {ok, IP} ->
       ip_addresses(Rest, [#ip_address{ip_address = IP}|Acc]);
     %% Raise this error somehow?
     _Else ->
       ip_addresses(Rest, Acc)
-   end.
+   end;
+ip_addresses([_|Rest], Acc) ->
+  ip_addresses(Rest, Acc).
+
+port_mappings(#{port_mappings := PortMappings}) ->
+  port_mappings(PortMappings, []);
+port_mappings(_) -> [].
+
+port_mappings([], Acc) ->
+  Acc;
+port_mappings([#{container_port := ContainerPort, host_port := HostPort, protocol := Protocol}|Rest], Acc) ->
+  PortMapping1 = #port_mapping{protocol = protocol(Protocol), host_port = HostPort, container_port = ContainerPort},
+  port_mappings(Rest, [PortMapping1|Acc]);
+port_mappings([_|Rest], Acc) ->
+  port_mappings(Rest, Acc). 
 
 
 -spec(id(mesos_agent_state()) -> binary()).
@@ -430,9 +402,12 @@ ports_from_discovery(#{ports := #{ports := Ports}}) ->
 ports_from_discovery(_) ->
   [].
 
-protocol(<<"tcp">>) -> tcp;
-protocol(<<"udp">>) -> udp.
-
+protocol(BinString) when is_binary(BinString) ->
+    String = binary_to_list(BinString),
+    case string:to_lower(String) of
+        "tcp" -> tcp;
+        "udp" -> udp
+    end.
 
 -ifdef(TEST).
 
